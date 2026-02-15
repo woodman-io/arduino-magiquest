@@ -1,131 +1,108 @@
-#include <IRremote.h>
-#include <IRremoteInt.h>
+#include <IRremote.hpp>
 
-// MagiQuest protocol for IR
+// MagiQuest protocol constants
 #define MAGIQUEST_PERIOD     1150
-#define MAGIQUEST_MARK_ZERO  280
-#define MAGIQUEST_SPACE_ZERO 850
-#define MAGIQUEST_MARK_ONE   580
-#define MAGIQUEST_SPACE_ONE  600
-#define MAGIQUEST_BITS 56
+#define MAGIQUEST_TOLERANCE  200
 
-// we use an alternate `decode_type` for our IRremote decoding
-#define MAGIQUEST 11
-
-// The magiquest payload is a bit different from the
-// standard IRremote payload
 union magiquest {
   uint64_t llword;
-  uint8_t    byte[8];
-  uint32_t  lword[2];
+  uint8_t  byte[8];
+  uint32_t lword[2];
   struct {
     uint16_t magnitude;
     uint32_t wand_id;
     uint8_t  padding;
     uint8_t  scrap;
-  } cmd ;
-} ;
+  } cmd;
+};
 
-// hoist IRremote DEFs into our namespace for quick compatibility
 #define ERR 0
 #define DECODED 1
 
-// Use analog 0 as our receiver
 int recv_pin = A0;
-IRrecv irrecv(recv_pin);
-
-// Results as read from the IR sensor. We need to run this through
-// the decodeMagiQuest function to get useful data.
-decode_results results;
 magiquest data;
 
+bool customMatchMark(uint16_t measured, uint16_t desired);
+int32_t decodeMagiQuest(magiquest *mdata);
+
 void setup() {
-
-  // Let's use comms for debug
-  Serial.begin(9600);
+  Serial.begin(115200);
+  while (!Serial) { ; }
   
-  while (!Serial) {
-    ;
-  }
-
-  Serial.println("Comms enabled - beginning sensing");
-
-  // turn on IR receiver
-  irrecv.enableIRIn();
+  Serial.println("=== MagiQuest IR Decoder ===");
+  Serial.println("Point your wand at the sensor and activate it");
+  IrReceiver.begin(recv_pin, ENABLE_LED_FEEDBACK);
 }
 
 void loop() {
-  
-  // Wait and decode
-  if (irrecv.decode(&results)) {
- 
-    // translate the bit stream into something we can use
-    // to understand a MagiQuest wand
-    decodeMagiQuest(&results, &data);
-    Serial.print("wand_id: ");
-    Serial.println(data.cmd.wand_id);
-    Serial.print("magnitude: ");
-    Serial.println(data.cmd.magnitude);
-
-    // keep receiving data 
-    irrecv.resume(); 
+  if (IrReceiver.decode()) {
+    Serial.println("\n--- IR Signal Received ---");
+    Serial.print("Protocol: ");
+    Serial.println(getProtocolString(IrReceiver.decodedIRData.protocol));
+    Serial.print("Address: 0x");
+    Serial.println(IrReceiver.decodedIRData.address, HEX);
+    Serial.print("Command: 0x");
+    Serial.println(IrReceiver.decodedIRData.command, HEX);
+    Serial.print("Raw Data: 0x");
+    Serial.println(IrReceiver.decodedIRData.decodedRawData, HEX);
+    
+    if (decodeMagiQuest(&data) == DECODED) {
+      Serial.println("*** MagiQuest Decoded! ***");
+      Serial.print("Wand ID: ");
+      Serial.println(data.cmd.wand_id, HEX);
+      Serial.print("Magnitude: ");
+      Serial.println(data.cmd.magnitude, HEX);
+      Serial.print("Raw as struct - Wand: ");
+      Serial.print(data.cmd.wand_id);
+      Serial.print(", Mag: ");
+      Serial.println(data.cmd.magnitude);
+    } else {
+      Serial.println("Custom decoder failed");
+    }
+    
+    Serial.println("--- End Signal ---\n");
+    IrReceiver.resume();
   }
-
-  // wait a bit, and then back to receiving and decoding
   delay(100);
 }
 
-/*
- * This decodeMagiQuest method cribbed from mpflaga (https://github.com/mpflaga/Arduino-IRremote) 
- * mode of the Arduino IRremote library. Excised and updated to work with current IRremote
- * library.
- * 
- * https://github.com/mpflaga/Arduino-IRremote/blob/master/IRremote.cpp
- * 
- */
-int32_t  decodeMagiQuest(decode_results *results, magiquest *mdata) {
-  magiquest data;
-  data.llword = 0;
+bool customMatchMark(uint16_t measured, uint16_t desired) {
+  return (measured >= desired - MAGIQUEST_TOLERANCE && 
+          measured <= desired + MAGIQUEST_TOLERANCE);
+}
 
-  int16_t offset = 1;
-  uint16_t mark_;
-  uint16_t space_;
-  uint8_t multiple_;
-
-  if (irparams.rawlen < 2 * MAGIQUEST_BITS) {
+int32_t decodeMagiQuest(magiquest *mdata) {
+  // Check if MagiQuest protocol was detected
+  if (IrReceiver.decodedIRData.protocol != MAGIQUEST) {
     return ERR;
   }
-
-  while (offset + 1 < irparams.rawlen) {
-    mark_ = results->rawbuf[offset];
-    space_ = results->rawbuf[offset+1];
-    multiple_ = space_ / mark_;
-    // it is either 25% + 75% or 50% + 50%
-
-    if (MATCH_MARK(space_ + mark_, MAGIQUEST_PERIOD)) {
-      if (multiple_ > 1) {
-        data.llword <<= 1;
-      } else {
-        data.llword = (data.llword << 1) | 1;
-      }
-    } else {
-      return ERR;
-    }
-    offset++;
-    offset++;
+  
+  // Clear the data structure first
+  mdata->llword = 0;
+  
+  // Extract data from the IRremote library's decoded result
+  // Address contains wand_id, Command contains magnitude
+  mdata->cmd.wand_id = IrReceiver.decodedIRData.address;
+  mdata->cmd.magnitude = IrReceiver.decodedIRData.command;
+  
+  // Store the complete raw decoded data as well
+  uint64_t rawData = IrReceiver.decodedIRData.decodedRawData;
+  
+  // For debugging - show what we extracted
+  Serial.print("Extracted - Wand ID: 0x");
+  Serial.print(mdata->cmd.wand_id, HEX);
+  Serial.print(" (");
+  Serial.print(mdata->cmd.wand_id);
+  Serial.print("), Magnitude: 0x");
+  Serial.print(mdata->cmd.magnitude, HEX);
+  Serial.print(" (");
+  Serial.print(mdata->cmd.magnitude);
+  Serial.println(")");
+  
+  // Validation - accept any non-zero wand_id
+  if (mdata->cmd.wand_id != 0) {
+    return DECODED;
   }
-  // Success
-  results->bits = (offset + 1) / 2;
-  if (results->bits < 12) {
-    results->bits = 0;
-    return ERR;
-  }
-  //results->magiquestMagnitude = data.cmd.magnitude;
-  results->value = data.cmd.wand_id;
-  results->decode_type = MAGIQUEST;
-
-  // fill in our magiquest struct
-  mdata->cmd.magnitude = data.cmd.magnitude;
-  mdata->cmd.wand_id = data.cmd.wand_id;
-  return DECODED;
+  
+  return ERR;
 }
